@@ -1,0 +1,8 @@
+# 减小构建上下文。注意:*.md 等模式只匹配根目录一级,
+# assets/ 下的 SKILL.md / README.md 会正常 COPY 进镜像。
+.git
+.gitignore
+.dockerignore
+*.md
+profiles/
+**/.DS_Store

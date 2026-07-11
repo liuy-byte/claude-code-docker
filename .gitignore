@@ -1,0 +1,5 @@
+# cca 的 profile 存在各机 ~/.config/cca/(仓库外),本就不入库。
+# 双保险:防止在项目内误建含真实 KEY 的 env 文件被提交。
+# *.env 含 .env 本身;profiles/*.env.example 是占位符模板,不被匹配,正常入库。
+*.env
+.DS_Store

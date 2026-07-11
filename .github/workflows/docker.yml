@@ -1,0 +1,98 @@
+name: Build and Push Docker Image
+
+# 不做 paths 过滤:本仓库以「单 commit 重开历史」方式推送,force-push 前后无共同祖先,
+# GitHub 算不出变更文件列表会导致 paths 过滤的 workflow 被静默跳过。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # 支持在 Actions 页面手动触发
+  schedule:
+    # 每天定时构建一次,跟进最新版 claude-code;该版本镜像已存在时自动跳过(见 skip 步骤)。
+    # cron 用 UTC:'0 18 * * *' = 北京时间次日 02:00(避开整点高峰,触发更准时)
+    - cron: '0 18 * * *'
+
+# 同一分支同一时刻只跑一个构建:防快速连推 / push 撞定时,并发多个多架构构建争抢同一组
+# tag(后完成的覆盖先完成的,latest 可能指向旧 sha)。cancel-in-progress: false —— 排队而非
+# 打断,避免定时构建被随后的 push 中途取消。
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: false
+
+# 镜像仓库地址/凭证从 GitHub Secrets 读(公开库不暴露命名空间),说明见 README《自己构建镜像》
+env:
+  REGISTRY: ${{ secrets.ACR_REGISTRY }}
+  IMAGE_NAME: ${{ secrets.ACR_IMAGE_NAME }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # 查 npm 上的最新版本号:作 build-arg(版本没变 ⇒ npm 层缓存命中,构建秒完)
+      # + 作镜像 tag(新版有问题时可按版本号回滚)。version_tag 是版本号 tag 的完整
+      # 镜像引用,skip 检查与 tags 列表共用这一处定义,保证两者永远同构。
+      - name: Get latest claude-code version
+        id: cc
+        run: |
+          V=$(npm view @anthropic-ai/claude-code version)
+          # 版本号为空会生成畸形的空 tag(.../claude-code:),中止而非硬推
+          [ -n "$V" ] || { echo "❌ 未取到 claude-code 版本号,中止本次构建" >&2; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "version_tag=$REGISTRY/$IMAGE_NAME:$V" >> "$GITHUB_OUTPUT"
+
+      # 提前登录:下面的 skip 检查要访问 registry 查 manifest
+      - name: Log in to registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      # 仅定时触发:该版本镜像已发布 = 没有新版,跳过后续构建。
+      # push / 手动触发不跳过 —— Dockerfile 等可能变了,同版本号也要重建。
+      - name: Skip scheduled build if version already published
+        id: skip
+        if: github.event_name == 'schedule'
+        run: |
+          if docker manifest inspect "${{ steps.cc.outputs.version_tag }}" >/dev/null 2>&1; then
+            echo "claude-code ${{ steps.cc.outputs.version }} 镜像已存在,跳过本次定时构建"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # checkout 放在 skip 判定之后:定时跳过时连仓库都不用拉(上面几步只查 npm/registry)
+      - name: Checkout code
+        if: steps.skip.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
+      # 跨架构构建需要 QEMU 模拟(在 amd64 runner 上构 arm64)
+      - name: Set up QEMU
+        if: steps.skip.outputs.skip != 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.skip.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Get short SHA
+        if: steps.skip.outputs.skip != 'true'
+        id: short-sha
+        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        if: steps.skip.outputs.skip != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          # 多架构:amd64(Intel/Linux 服务器)+ arm64(Apple Silicon / arm 服务器)
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            CC_VERSION=${{ steps.cc.outputs.version }}
+          # 三个 tag:latest(日常用)、claude-code 版本号(按版本回滚)、git sha(对应仓库提交)
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ steps.cc.outputs.version_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.short-sha.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

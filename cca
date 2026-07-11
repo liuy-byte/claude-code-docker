@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# cca —— 容器化 Claude Code 启动器:单文件自包含,只需本脚本 + docker。
+# 安装/用法/中转配置详见 README:https://github.com/liuy-byte/claude-code-docker
+#
+#   cca                  # 官方订阅(首次 OAuth 登录)
+#   cca init <名>         # 从仓库模板生成中转 profile(CC_KEY=xxx 可直接注入)
+#   cca update           # 拉取最新镜像 + 自升级本脚本(平时启动不自动更新)
+#   CC_PROFILE=<名> cca   # 用某家中转;cca bash 进容器调试;cca -p "任务" 非交互
+
+set -euo pipefail
+
+REPO_RAW="${CC_REPO_RAW:-https://raw.githubusercontent.com/liuy-byte/claude-code-docker/main}"
+IMAGE="${CC_IMAGE:-}"
+CONFIG_DIR="${CC_CONFIG_DIR:-$HOME/.config/cca}"
+PROFILE="${CC_PROFILE:-official}"
+# official 沿用原卷名(老用户不掉登录);其余 profile 各用独立卷,可并行互不覆盖
+if [ "$PROFILE" = "official" ]; then VOLUME="claude-config"; else VOLUME="claude-config-$PROFILE"; fi
+CLAUDE_HOME="/home/node/.claude"   # 挂载点,与 Dockerfile 的目录契约一致
+
+# --- cca -h / help:本脚本自身用法(--help 不拦截,透传给容器内 claude)---
+case "${1:-}" in -h|help)
+  cat <<'EOF'
+cca —— 容器化 Claude Code 启动器(详见 README:https://github.com/liuy-byte/claude-code-docker)
+  cca                  官方订阅(首次 OAuth 登录)
+  cca init <名>         从仓库模板生成中转 profile(CC_KEY=xxx 可直接注入)
+  cca update           拉取最新镜像 + 自升级本脚本(平时启动不自动更新)
+  cca doctor           自检:环境 / profile / ssh / 卷与版本(默认只报问题,-v 看全部)
+  cca bash             进容器 shell 调试(带补全和常用别名)
+  cca -p "任务"         非交互跑一个任务;其余 - 开头参数均透传给 claude(claude 帮助:cca --help)
+  CC_PROFILE=<名> cca   用某家中转;CC_IMAGE 指定镜像;CC_SEED=0/1 跳过/强制重播播种
+  CC_SSH=0 cca          关闭 ssh-agent 转发(默认宿主机有 agent 就转发;私钥本体不进容器)
+EOF
+  exit 0
+;; esac
+
+# --- cca init <名>:从仓库模板一键生成 profile(不碰 docker,装完即可用)---
+if [ "${1:-}" = "init" ]; then
+  NAME="${2:-}"
+  [ -n "$NAME" ] || { echo "用法:cca init <名>(如 cca init glm;加 CC_KEY=xxx 可直接注入 KEY)" >&2; exit 1; }
+  DEST="$CONFIG_DIR/$NAME.env"
+  [ -f "$DEST" ] && { echo "⚠️  已存在,不覆盖:$DEST" >&2; exit 1; }
+  mkdir -p "$CONFIG_DIR"
+  if ! curl -fsSL -m 15 "$REPO_RAW/profiles/$NAME.env.example" -o "$DEST"; then
+    rm -f "$DEST"
+    echo "⚠️  仓库没有 $NAME 模板,现有模板见仓库 profiles/ 目录" >&2
+    exit 1
+  fi
+  chmod 600 "$DEST"
+  if [ -n "${CC_KEY:-}" ]; then
+    # 逐行重写注入 KEY(不用 sed:KEY 含 |、&、\ 等 sed 特殊字符会被误解释);
+    # umask 077 让临时文件从创建起就是 600,mv 后权限保持不变。
+    TMP="$DEST.tmp"
+    ( umask 077
+      while IFS= read -r line; do
+        case "$line" in
+          ANTHROPIC_AUTH_TOKEN=*) printf 'ANTHROPIC_AUTH_TOKEN=%s\n' "$CC_KEY" ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+      done < "$DEST" > "$TMP"
+    ) && mv "$TMP" "$DEST" \
+      || { rm -f "$TMP"; echo "⚠️  KEY 注入失败;模板已生成,请手动编辑 $DEST 填入 KEY" >&2; exit 1; }
+    echo "✅ 已生成 ${DEST}(KEY 已注入)。用法:CC_PROFILE=$NAME cca"
+  else
+    echo "✅ 已生成 ${DEST}。编辑填入真实 KEY 后:CC_PROFILE=$NAME cca"
+  fi
+  exit 0
+fi
+
+# --- cca doctor:只读自检,逐项打印 ✅/⚠️,任何一项失败都不中断后续检查 ---
+# 放在 init 之后、docker 探测之前:doctor 要诊断 docker 是否可用,不能被主流程的 exit 1 拦住。
+if [ "${1:-}" = "doctor" ]; then
+  # 默认「只报问题」(全绿刷屏会淹没真正要看的 ⚠️);-v 才逐条列全部。
+  VERBOSE=0; [ "${2:-}" = "-v" ] && VERBOSE=1
+  warn=0; total=0             # 告警数 / 检查总项数
+  _group=''; _group_shown=0   # 当前组标题 + 是否已打印(懒打印:首个 ⚠️ 时才出)
+
+  # group <标题> —— 声明进入一个检查组(verbose 立即打印,否则懒打印避免空标题噪音)。
+  group() {
+    _group="$1"; _group_shown=0
+    if [ "$VERBOSE" = 1 ]; then printf '\n▶ %s\n' "$_group"; _group_shown=1; fi
+  }
+
+  # check <ok?> <标题> [详情] —— 记录一项诊断结果:$1="ok" ⇒ ✅,其余 ⇒ ⚠️(走 stderr)。
+  #   计数用赋值式自增而非 ((warn++)):后者 0→1 返回旧值 0 会触发 set -e,诊断中途退出。
+  check() {
+    total=$((total + 1))
+    if [ "$1" = "ok" ]; then
+      if [ "$VERBOSE" = 1 ]; then
+        printf '  ✅ %s' "$2"; [ -n "${3:-}" ] && printf ' (%s)' "$3"; printf '\n'
+      fi
+    else
+      # 非 verbose 时首次告警前先补出所属组标题(每组至多补一次)
+      if [ "$VERBOSE" != 1 ] && [ "$_group_shown" = 0 ]; then
+        printf '\n▶ %s\n' "$_group" >&2; _group_shown=1
+      fi
+      printf '  ⚠️  %s' "$2" >&2; [ -n "${3:-}" ] && printf ' (%s)' "$3" >&2; printf '\n' >&2
+      warn=$((warn + 1))
+    fi
+  }
+
+  echo "cca doctor — 环境自检"
+
+  # === 组1:环境基础 ===
+  group "环境基础"
+  if command -v docker >/dev/null 2>&1; then
+    check ok "docker 已安装" "$(docker --version 2>/dev/null | head -1)"
+    if docker info >/dev/null 2>&1; then
+      check ok "docker daemon 运行中"
+    else
+      check "" "docker daemon 未运行" "启动 Docker Desktop / OrbStack 后重试"
+    fi
+  else
+    check "" "docker 未安装" "装并启动 Docker Desktop / OrbStack"
+  fi
+  if [ -n "$IMAGE" ]; then
+    check ok "CC_IMAGE 已设置" "$IMAGE"
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+      if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+        check ok "镜像已在本地"
+      else
+        check "" "镜像本地不存在" "首次 cca 会自动 pull,或先 cca update"
+      fi
+    fi
+  else
+    check "" "CC_IMAGE 未设置" "export CC_IMAGE=你的镜像地址(建议写进 ~/.zshrc)"
+  fi
+
+  # === 组2:Profile 配置 ===
+  group "profile 配置(当前 CC_PROFILE=$PROFILE)"
+  if [ -f "$CONFIG_DIR/common.env" ]; then
+    check ok "common.env 存在" "跨 profile 公共环境(如 git 身份)"
+  else
+    check ok "无 common.env" "可选;git 身份等公共变量放这里"
+  fi
+  if [ "$PROFILE" = "official" ]; then
+    check ok "official 官方订阅" "内置空 profile,无需 .env 文件"
+  else
+    PF="$CONFIG_DIR/$PROFILE.env"
+    if [ -f "$PF" ]; then
+      check ok "profile 文件存在" "$PF"
+      # 含真实 KEY,应为 600(stat 语法 macOS/Linux 不同,依次兜底)
+      perm=$(stat -f '%Lp' "$PF" 2>/dev/null || stat -c '%a' "$PF" 2>/dev/null || echo '?')
+      if [ "$perm" = "600" ]; then
+        check ok "profile 权限 600"
+      else
+        check "" "profile 权限为 $perm" "含 KEY,建议 chmod 600 $PF"
+      fi
+    else
+      check "" "profile 文件缺失" "cca init $PROFILE 生成,或手建 $PF"
+    fi
+  fi
+  # 顺带列出已有的 profile,方便对照
+  if compgen -G "$CONFIG_DIR/*.env" >/dev/null 2>&1; then
+    names=''
+    for f in "$CONFIG_DIR"/*.env; do n="${f##*/}"; names="$names ${n%.env}"; done
+    check ok "已有 profile" "${names# }"
+  fi
+
+  # === 组3:SSH agent ===
+  group "ssh-agent 转发"
+  if [ "${CC_SSH:-1}" = "0" ]; then
+    check ok "已由 CC_SSH=0 关闭" "容器内不转发 ssh-agent"
+  elif [ -z "${SSH_AUTH_SOCK:-}" ]; then
+    check "" "宿主机无 SSH_AUTH_SOCK" "没起 ssh-agent;容器内 git push SSH 会失败"
+  else
+    check ok "SSH_AUTH_SOCK 已设置"
+    if command -v ssh-add >/dev/null 2>&1; then
+      if ssh-add -l >/dev/null 2>&1; then
+        n=$(ssh-add -l 2>/dev/null | grep -c . || true)
+        check ok "agent 内有 key" "$n 个;容器内可请求签名"
+      else
+        check "" "agent 内无 key" "ssh-add 加载(macOS:ssh-add --apple-load-keychain)"
+      fi
+    fi
+  fi
+
+  # === 组4:卷与版本 ===
+  group "卷与版本"
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    if docker volume inspect "$VOLUME" >/dev/null 2>&1; then
+      check ok "当前 profile 的卷存在" "$VOLUME(登录态/历史持久化)"
+    else
+      check "" "当前 profile 的卷未创建" "$VOLUME;首次 cca 启动会自动建 + 播种默认配置"
+    fi
+    vols=$(docker volume ls -q 2>/dev/null | grep '^claude-config' | tr '\n' ' ' || true)
+    [ -n "$vols" ] && check ok "已有配置卷" "${vols% }"
+    if [ -n "$IMAGE" ] && docker image inspect "$IMAGE" >/dev/null 2>&1; then
+      ccv=$(docker run --rm "$IMAGE" claude --version 2>/dev/null | head -1 || true)
+      [ -n "$ccv" ] && check ok "镜像内 claude-code" "$ccv"
+    fi
+  else
+    check "" "docker 不可用,跳过卷/版本检查"
+  fi
+  # 软链接 = 本地开发模式,update 会跳过自升级
+  SELF="$(command -v -- "$0" 2>/dev/null || true)"; [ -x "$SELF" ] || SELF="$0"
+  if [ -L "$SELF" ]; then
+    check ok "cca 为软链接(开发模式)" "$SELF;cca update 会跳过脚本自升级"
+  fi
+
+  if [ "$warn" -gt 0 ]; then
+    echo >&2
+    echo "共 $warn 项告警(⚠️,已装 $((total - warn))/$total 项正常)。逐项按提示处理,或见 README 排错章节。" >&2
+    echo "看全部检查项(含通过的):cca doctor -v" >&2
+    exit 1
+  fi
+  # 全绿:不逐条刷 ✅,一句汇总(-v 时上面已逐条打过,这里同样一句收尾)
+  echo "全部通过 ✅($total 项)"
+  exit 0
+fi
+
+# --- 镜像:必须由 CC_IMAGE 指定;不在本地则显式拉取(进度可见,不静默卡住)---
+if [ -z "$IMAGE" ]; then
+  echo "⚠️  未设置 CC_IMAGE。请指向你的镜像(建议写进 ~/.zshrc):" >&2
+  echo "   export CC_IMAGE=your-registry.example.com/namespace/claude-code:latest" >&2
+  exit 1
+fi
+
+# --- docker 可用性探测:小白最常见的第一坑(没装 / Desktop 没启动)---
+# 放在 -h/init(纯本地、已在上面 exit)之后,故这两个子命令无 docker 也能用。
+# 不探测直接跑,报错会是晦涩的 `command not found`(127)或一长串 daemon 连接失败。
+if ! command -v docker >/dev/null 2>&1; then
+  echo "⚠️  未检测到 docker。请先安装并启动 Docker Desktop / OrbStack,再重开终端重试。" >&2
+  exit 1
+fi
+if ! docker info >/dev/null 2>&1; then
+  echo "⚠️  docker 已安装但守护进程没在运行。请先启动 Docker Desktop / OrbStack 再试。" >&2
+  exit 1
+fi
+
+# --- cca update:拉最新镜像,再从镜像内提取配套 cca 自升级(平时启动不自动更新)---
+# 脚本随镜像分发(走同一条 registry 通道,版本天然配对);GitHub raw 只用于首次安装和 init 模板。
+if [ "${1:-}" = "update" ]; then
+  docker pull "$IMAGE"
+  # 自升级:临时文件放脚本同目录,mv 才是同盘原子替换;失败只警告(镜像已更完,脚本旧点不影响用)。
+  # 先把 $0 解析成真实绝对路径:裸名 `cca` 调用时 $0 可能是相对名,直接 mv 会写到 cwd 而非 PATH 里那个。
+  SELF="$(command -v -- "$0" 2>/dev/null || true)"; [ -x "$SELF" ] || SELF="$0"
+  TMP="$SELF.new"
+  if [ -L "$SELF" ]; then
+    echo "ℹ️  $SELF 是软链接(本地开发模式),跳过脚本自升级" >&2
+  elif ! docker run --rm "$IMAGE" cat /opt/cc-assets/cca > "$TMP" 2>/dev/null; then
+    rm -f "$TMP"; echo "⚠️  镜像内未带 cca(旧镜像?),跳过脚本自升级" >&2
+  elif cmp -s "$TMP" "$SELF"; then
+    rm -f "$TMP"; echo "✅ 脚本已是最新" >&2
+  elif chmod +x "$TMP" && mv "$TMP" "$SELF"; then
+    # 当前进程仍是升级前读入内存的旧脚本;新逻辑下次运行才生效
+    echo "✅ 脚本已自升级:$SELF(下次运行生效)" >&2
+  else
+    rm -f "$TMP"; echo "⚠️  脚本替换失败,跳过自升级" >&2
+  fi
+  exit 0
+fi
+
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
+
+# --- 组装 docker run 参数 ---
+args=(--rm -i)
+# 只在真终端下加 -t(否则非交互场景如 `cca -p "任务"` / 管道会报 TTY 错误)
+[ -t 0 ] && [ -t 1 ] && args+=(-t)
+args+=(
+  # 挂载并进入宿主机同名路径:Claude 按 cwd 存会话历史/项目信任,同名挂载让 --continue/--resume
+  # 按项目隔离(统一挂 /workspace 会串项目),报错路径也与宿主机一致、终端可点击跳转。
+  -v "$PWD:$PWD" -w "$PWD"
+  # 登录态/配置/历史持久化的命名卷
+  -v "$VOLUME:$CLAUDE_HOME"
+  # 容器访问宿主机(如代理)的通用别名;Linux 必需,Desktop/OrbStack 下冗余无害
+  --add-host host.docker.internal:host-gateway
+)
+
+# --- 终端能力透传:docker -t 默认 TERM=xterm(8 色),Claude TUI 色彩与 bash 彩色
+# 提示符全靠这两个变量判断;透传宿主机真实值,容器内还原 256 色/真彩色。---
+args+=(-e TERM="${TERM:-xterm-256color}")
+if [ -n "${COLORTERM:-}" ]; then args+=(-e COLORTERM="$COLORTERM"); fi
+
+# --- SSH:转发宿主机 ssh-agent(只挂 agent socket,私钥本体不进容器,容器只能请求签名)---
+# macOS 的 agent socket 穿不过文件共享层,但 Docker Desktop / OrbStack 在 VM 内提供统一转发路径
+# /run/host-services/ssh-auth.sock;Linux/WSL2 直接挂 $SSH_AUTH_SOCK。CC_SSH=0 关闭,
+# 特殊环境(如 colima)用 CC_SSH_SOCK 指定。accept-new 首次自动信任,免去容器内无 known_hosts 的卡壳。
+if [ "${CC_SSH:-1}" != "0" ] && [ -n "${SSH_AUTH_SOCK:-}" ]; then
+  if [ "$(uname -s)" = "Darwin" ]; then
+    SSH_SOCK="${CC_SSH_SOCK:-/run/host-services/ssh-auth.sock}"
+  else
+    SSH_SOCK="${CC_SSH_SOCK:-$SSH_AUTH_SOCK}"
+  fi
+  args+=(-v "$SSH_SOCK:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent
+         -e GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new")
+fi
+
+# --- 环境注入:common.env(跨 profile 公共,如 git 身份)先加载,profile 同键覆盖 ---
+if [ -f "$CONFIG_DIR/common.env" ]; then
+  args+=(--env-file "$CONFIG_DIR/common.env")
+fi
+# official 是内置空 profile(不设鉴权 = 官方订阅),无文件也行;其余 profile 必须有文件。
+PROFILE_FILE="$CONFIG_DIR/$PROFILE.env"
+if [ -f "$PROFILE_FILE" ]; then
+  args+=(--env-file "$PROFILE_FILE")
+elif [ "$PROFILE" != "official" ]; then
+  echo "⚠️  找不到 profile:$PROFILE_FILE" >&2
+  echo "   已有的 profile:" >&2
+  if compgen -G "$CONFIG_DIR/*.env" >/dev/null; then
+    for f in "$CONFIG_DIR"/*.env; do n="${f##*/}"; echo "     - ${n%.env}"; done >&2
+  else
+    echo "     (无 —— 用 cca init <名> 生成,或手建 $CONFIG_DIR/<名>.env)" >&2
+  fi
+  echo "   或不带 CC_PROFILE 直接跑 = 官方订阅。" >&2
+  exit 1
+fi
+
+# --- 首启自动播种默认 settings(多机开箱即用)---
+# 卷不存在 = 新机器,播一次默认配置;jq 合并、已有键优先,不会冲掉后来的修改。
+# CC_SEED=1 强制重播 / CC_SEED=0 跳过;放一份 $CONFIG_DIR/seed.json 可整体替换内置默认。
+SEED="${CC_SEED:-}"
+if [ "$SEED" != "0" ] && { [ "$SEED" = "1" ] || ! docker volume inspect "$VOLUME" >/dev/null 2>&1; }; then
+  SEED_JSON='{
+    "theme": "dark",
+    "language": "Chinese",
+    "includeCoAuthoredBy": false,
+    "skipDangerousModePermissionPrompt": true,
+    "permissions": {"defaultMode": "bypassPermissions"}
+  }'
+  if [ -f "$CONFIG_DIR/seed.json" ]; then
+    SEED_JSON="$(cat "$CONFIG_DIR/seed.json")"
+  fi
+  # 失败不阻塞启动但要出声(seed.json 写坏 JSON 静默不生效极难排查);保留 stderr 透传 jq 报错,只丢 stdout。
+  docker run --rm -v "$VOLUME:$CLAUDE_HOME" -w "$CLAUDE_HOME" "$IMAGE" \
+    bash -c '
+      [ -f settings.json ] || echo "{}" > settings.json
+      # $s * . = 默认打底、已有覆盖,绝不冲掉你已改的键
+      jq --argjson s "$0" "\$s * ." settings.json > s.tmp && mv s.tmp settings.json
+    ' "$SEED_JSON" >/dev/null \
+    || echo "⚠️  默认配置播种失败(不影响本次启动);若配了 $CONFIG_DIR/seed.json 请检查其 JSON 语法" >&2
+fi
+
+echo "▶ profile=$PROFILE  workspace=$PWD" >&2
+
+# 首参为 flag 时补 claude。新镜像的 entrypoint 已内置同样规则,这里保留是为兼容旧镜像。
+case "${1:-}" in -*) set -- claude "$@" ;; esac
+
+exec docker run "${args[@]}" "$IMAGE" "$@"

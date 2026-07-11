@@ -1,0 +1,54 @@
+#!/bin/sh
+# 公共 skill 同步:镜像 /opt/cc-assets/skills → 卷 ~/.claude/skills(约定 cc- 前缀,见该目录 README)。
+# 先清卷内 cc-* 再铺当前版 ⇒ 幂等、镜像删除不残留;非 cc-* 的私有 skill 不碰。失败不阻塞启动。
+SRC=/opt/cc-assets/skills
+DST=/home/node/.claude/skills
+if [ -d "$SRC" ]; then
+  mkdir -p "$DST" && rm -rf "$DST"/cc-*
+  cp -r "$SRC"/cc-* "$DST"/ 2>/dev/null || true
+fi
+
+# statusLine 公共脚本随镜像分发:每次启动复制到卷,再 jq 把默认 statusLine 块合并进
+# settings.json(默认打底 + 已有覆盖,不冲用户定制)。想替换改 settings.json 的
+# statusLine.command,别直接改卷内 statusline.sh —— 下次 update 会被覆盖。失败不阻塞启动。
+SRC_SL=/opt/cc-assets/statusline.sh
+DST_SL=/home/node/.claude/statusline.sh
+if [ -f "$SRC_SL" ]; then
+  cp "$SRC_SL" "$DST_SL" 2>/dev/null \
+    && chmod +x "$DST_SL" 2>/dev/null || true
+fi
+SETTINGS=/home/node/.claude/settings.json
+if command -v jq >/dev/null 2>&1; then
+  [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS" 2>/dev/null || true
+  # 合并失败多因卷内 settings.json 被手改成非法 JSON:降级(保留坏文件不动)但要出声 ——
+  # 静默会让"状态栏没了 + 配置疑似丢失"极难排查(同 cca SEED 分支的"失败不阻塞但告警"原则)。
+  if jq --argjson s "{\"statusLine\":{\"type\":\"command\",\"command\":\"$DST_SL\"}}" \
+       '$s * .' "$SETTINGS" > "$SETTINGS.tmp" 2>/dev/null; then
+    mv "$SETTINGS.tmp" "$SETTINGS"
+  else
+    rm -f "$SETTINGS.tmp"
+    echo "⚠️  合并 statusLine 到 $SETTINGS 失败(不影响本次启动);多半是该文件 JSON 语法有误,请检查。" >&2
+  fi
+fi
+
+# .claude.json 持久化:Claude 把 onboarding 标记/项目信任写在 $HOME/.claude.json(在 .claude 卷**外**),
+# 不处理会随 --rm 丢失 ⇒ 每次都重走欢迎流程。修法:软链接到卷内,让写入落进持久卷。失败不阻塞启动。
+link_claude_json() {
+  HOME_JSON="/home/node/.claude.json"
+  VOL_JSON="/home/node/.claude/.claude.json"
+
+  # 首启时 HOME 是真实文件:卷内没有就搬进去(别丢已写状态),卷内已有则以卷为准;随后删真实文件让位软链接。
+  if [ -f "$HOME_JSON" ] && [ ! -L "$HOME_JSON" ]; then
+    [ -e "$VOL_JSON" ] || cp "$HOME_JSON" "$VOL_JSON"
+    rm -f "$HOME_JSON"
+  fi
+  # 全新卷先播空 JSON,避免悬空软链接(会被 Claude 当成"文件不存在",照样重走欢迎流程)
+  [ -e "$VOL_JSON" ] || echo '{}' > "$VOL_JSON"
+  ln -sf "$VOL_JSON" "$HOME_JSON"   # -sf 覆盖已存在软链接,幂等
+}
+link_claude_json 2>/dev/null || true
+
+# 首参为空或以 - 开头 ⇒ 交给 claude(修 node 镜像把 flag 当 node 参数的问题),
+# 否则按命令执行(如 `cca bash` 调试)。
+case "${1:--}" in -*) set -- claude "$@";; esac
+exec "$@"
