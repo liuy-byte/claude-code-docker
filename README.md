@@ -103,7 +103,7 @@ echo "alias ccm='CC_PROFILE=minimax cca'" >> ~/.zshrc   # 之后敲 ccm = 用 Mi
 每家中转商写一个 profile 文件放在 `~/.config/cca/<名>.env`,想用哪家就 `CC_PROFILE=<名> cca`。
 官方订阅是内置的空 profile(`official`),无需建文件 —— 不带 `CC_PROFILE` 就是它。
 
-**建一个 profile**:`cca init <名>` 从仓库 `profiles/` 模板一键生成(现有 **minimax**、**glm** 两份):
+**建一个 profile**:`cca init <名>` 从仓库 `profiles/` 模板一键生成(现有 **official**、**minimax**、**glm** 三份):
 
 ```bash
 cca init glm                 # 生成 ~/.config/cca/glm.env(自动 chmod 600),再编辑填 KEY
