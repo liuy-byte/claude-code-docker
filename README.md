@@ -182,6 +182,17 @@ docker push your-registry.example.com/namespace/claude-code:latest
 | 模型不存在/报错 | 中转模型名与官方不同,在 profile 里改 `ANTHROPIC_DEFAULT_*_MODEL` |
 | 提交报 "empty ident" | 在 `~/.config/cca/common.env` 里配 `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`(及 `GIT_COMMITTER_*`) |
 | 容器内 `git push` SSH 仓库失败 | 宿主机 `ssh-add -l` 是否列出 key(macOS 重启后需 `ssh-add --apple-load-keychain`;Linux 无桌面需自行起 agent);不想用 SSH 就 `CC_SSH=0` + HTTPS remote + token |
+| 剪贴板图片粘不进去(Ctrl/Cmd+V 无反应) | 不是 bug,是 Claude Code 的限制:容器是 Linux,而它在 Linux 上**显式禁用了终端粘贴键读剪贴板图片**([issue #48402](https://github.com/anthropics/claude-code/issues/48402),官方标为 not planned)。改用 `@路径` 引用图片文件,见下方「粘贴图片」 |
+
+## 粘贴图片
+
+容器是 Linux,而 Claude Code 在 Linux 上**显式禁用了终端粘贴键(Ctrl/Cmd+V)读剪贴板图片**([issue #48402](https://github.com/anthropics/claude-code/issues/48402),官方标为 not planned),这跟本项目无关、装什么工具都绕不过。所以容器里粘不了图不是配置问题,用 **`@路径` 引用图片文件** 代替 —— 这条路不碰剪贴板,稳定可用:
+
+1. **把图片存进当前项目目录**:macOS 截图 `⌘⇧4`(默认落桌面,或截图工具里设成存到项目);已在剪贴板里的图,用「预览」等另存进项目也行。
+2. 在 Claude Code 输入框敲 `@` + 文件名,会自动补全,例如 `@shot.png`。
+3. 或直接**从访达把图片文件拖进输入框**,自动变成路径。
+
+> `cca` 把当前目录以宿主机**同名路径**挂进容器,所以你 `@` 的路径在容器内外完全一致,不会错位 —— 宿主机能看到的图,容器就能读到。
 
 ## 卸载
 
