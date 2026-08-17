@@ -4,8 +4,12 @@
 SRC=/opt/cc-assets/skills
 DST=/home/node/.claude/skills
 if [ -d "$SRC" ]; then
-  mkdir -p "$DST" && rm -rf "$DST"/cc-*
-  cp -r "$SRC"/cc-* "$DST"/ 2>/dev/null || true
+  mkdir -p "$DST" 2>/dev/null || true
+  # 目标被宿主机 skills 只读挂载覆盖时不可写 ⇒ 跳过同步(宿主为唯一来源,写只会报错)
+  if [ -w "$DST" ]; then
+    rm -rf "$DST"/cc-*
+    cp -r "$SRC"/cc-* "$DST"/ 2>/dev/null || true
+  fi
 fi
 
 # statusLine 公共脚本随镜像分发:每次启动复制到卷,再 jq 把默认 statusLine 块合并进

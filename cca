@@ -29,6 +29,7 @@ cca —— 容器化 Claude Code 启动器(详见 README:https://github.com/liuy
   cca -p "任务"         非交互跑一个任务;其余 - 开头参数均透传给 claude(claude 帮助:cca --help)
   CC_PROFILE=<名> cca   用某家中转;CC_IMAGE 指定镜像;CC_SEED=0/1 跳过/强制重播播种
   CC_SSH=0 cca          关闭 ssh-agent 转发(默认宿主机有 agent 就转发;私钥本体不进容器)
+  CC_SKILLS=0 cca       关闭宿主机 skills 挂载(默认宿主有 ~/.claude/skills 就只读挂入,覆盖镜像公共)
 EOF
   exit 0
 ;; esac
@@ -191,6 +192,14 @@ if [ "${1:-}" = "doctor" ]; then
   else
     check "" "docker 不可用,跳过卷/版本检查"
   fi
+  # 宿主机个人 skills:存在则只读挂入(宿主说了算),不存在退回镜像公共 skill(cc-* 启动同步)
+  if [ "${CC_SKILLS:-1}" = "0" ]; then
+    check ok "CC_SKILLS=0 已关闭" "容器内仅镜像公共 skill(cc-* 启动同步)"
+  elif [ -d "$HOME/.claude/skills" ]; then
+    check ok "宿主机 skills 只读挂入" "$HOME/.claude/skills → 容器 ~/.claude/skills(覆盖镜像公共)"
+  else
+    check "" "宿主机无 ~/.claude/skills" "容器内用镜像公共 skill;需要个人 skill 请在宿主机建该目录"
+  fi
   # 软链接 = 本地开发模式,update 会跳过自升级
   SELF="$(command -v -- "$0" 2>/dev/null || true)"; [ -x "$SELF" ] || SELF="$0"
   if [ -L "$SELF" ]; then
@@ -265,6 +274,13 @@ args+=(
   # 容器访问宿主机(如代理)的通用别名;Linux 必需,Desktop/OrbStack 下冗余无害
   --add-host host.docker.internal:host-gateway
 )
+
+# --- 宿主机个人 skills 只读挂入(宿主为单一事实来源,覆盖卷内镜像同步的 cc-*)---
+# 挂载只读 ⇒ 容器改不了宿主 skills;宿主无 skills 目录时静默跳过(退回镜像公共 skill 机制)。
+# CC_SKILLS=0 关闭(如临时想要镜像公共 skill)。入口 cc-entrypoint 检测到只读挂载会跳过同步。
+if [ "${CC_SKILLS:-1}" != "0" ] && [ -d "$HOME/.claude/skills" ]; then
+  args+=(-v "$HOME/.claude/skills:$CLAUDE_HOME/skills:ro")
+fi
 
 # --- 终端能力透传:docker -t 默认 TERM=xterm(8 色),Claude TUI 色彩与 bash 彩色
 # 提示符全靠这两个变量判断;透传宿主机真实值,容器内还原 256 色/真彩色。---
