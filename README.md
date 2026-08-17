@@ -149,7 +149,7 @@ CC_PROFILE=deepseek cca   # DeepSeek(官方 Anthropic 兼容端点,V4 模型)
 
 ### 公共 statusLine
 
-仓库 `assets/statusline.sh` 会打进镜像,容器**每次启动**自动同步到卷内 `~/.claude/statusline.sh`,并把 `statusLine` 块合并进 `settings.json`(默认配置:`model · cwd (branch [!N ?N]) · pct%`,按用量变色的上下文百分比 + starship 风格 git 状态)。
+仓库 `assets/statusline.sh` 会打进镜像,容器**每次启动**自动同步到卷内 `~/.claude/statusline.sh`,并把 `statusLine` 块合并进 `settings.json`(默认 robbyrussell 风格:`➜ 目录 git:(分支)↑N │ 模型 │ ctx % │ ⚡effort │ 5h %→HH:MM │ 7d % │ 输出风格 │ @会话`,按用量变色的 5h/7d 限额、非默认输出风格黄色提醒)。
 
 - **自定义**:**改 `settings.json` 里 `statusLine.command` 指到自己的脚本**(比如 `~/.claude/my-statusline.sh`),不要直接改 `~/.claude/statusline.sh` —— 下次镜像同步会被覆盖(等同公共 skill 约定)。
 - **跳过默认**:删 `settings.json` 里的 `statusLine` 块即可恢复 Claude Code 原生(空)行为。
@@ -224,7 +224,27 @@ docker push your-registry.example.com/namespace/claude-code:latest
 
 **中转模型收不了图(DeepSeek / 纯文本端点)**:`@路径` 引用后,图片会原样发给当前端点,DeepSeek 等纯文本模型会直接 400 拒绝。两条路:
 - 图片任务切支持图片的模型(官方订阅,或 `CC_PROFILE=minimax cca`)另开会话;
-- 留在当前会话,让 Claude 走 **`cc-vision` skill** —— 它把图片 base64 转给 MiniMax-M3 视觉接口分析,再回来继续处理。前提是配好 `MINIMAX_API_KEY`:`cca init common` 生成 `~/.config/cca/common.env` 模板,把里面的 `MINIMAX_API_KEY` 行解开填上(对所有 profile 生效,配完重启 cca)。
+- 留在当前会话,让 Claude 走 **`cc-vision` skill** —— 它把图片 base64 转给 MiniMax-M3 视觉接口分析,再回来继续处理。前提是配好 `MINIMAX_API_KEY`(见下)。
+
+#### cc-vision 配置与验证(借 MiniMax-M3 看图)
+
+cc-vision 与当前模型无关,DeepSeek(`ccd`)等纯文本 profile 正是它的设计场景。生效需满足两个前提:
+
+1. **skill 在容器里**:镜像内置 cc-vision,CI 构建 + `cca update` 后自动同步进 `~/.claude/skills/`。⚠️ 若宿主机配了 `~/.claude/skills`(只读挂入会整体接管镜像公共 skill),需把 `cc-vision/` 目录手动拷进宿主机 `~/.claude/skills/`。
+2. **`MINIMAX_API_KEY` 对当前 profile 可见**:放 `common.env` 则所有 profile(含官方订阅、DeepSeek)都能用;只放某个中转的 `.env` 则仅那个 profile 可见。配置:
+   ```bash
+   cca init common                       # 生成 ~/.config/cca/common.env(已有则不覆盖)
+   # 编辑:解开 MINIMAX_API_KEY 行填上 key → 重启 cca
+   ```
+
+**验证**(进容器 shell 用 `cca bash`):
+
+```bash
+ls ~/.claude/skills/            # 应看到 cc-vision/
+echo "${MINIMAX_API_KEY:+set}"  # 应打印 set;空 = common.env 没生效
+```
+
+然后回会话 `@图片` 或说"用 cc-vision 看下这个截图"。缺 KEY、图片超 10MB、格式不支持时,helper 脚本会给明确报错,不会静默失败。
 
 ## 卸载
 
