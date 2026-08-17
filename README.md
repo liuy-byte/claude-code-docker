@@ -111,13 +111,18 @@ CC_PROFILE=deepseek cca   # DeepSeek(官方 Anthropic 兼容端点,V4 模型)
 
 在 `~/.config/cca/common.env` 里配 `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`(及对应 `GIT_COMMITTER_*`),对所有 profile(含官方订阅)生效;profile 里同键可覆盖。不复用宿主机 `~/.gitconfig`。
 
-### SSH 转发
+### SSH(key 挂载 + agent 转发)
 
-默认转发宿主机 ssh-agent(挂的是 agent **socket**,私钥本体不进容器,容器只能请求签名、拿不到钥匙),macOS(OrbStack / Docker Desktop)与 Linux 均零配置,容器内 `git push` SSH 仓库开箱可用。
+容器访问宿主机 SSH 有两条通道,任一可用即能 `git push`:
 
-- **前提**是宿主机 agent 里有 key:macOS 一次性 `ssh-add --apple-use-keychain`(重启后 `ssh-add --apple-load-keychain`,可写进 `~/.zshrc` 自动恢复);Linux 无桌面环境需自行起 agent。
-- `CC_SSH=0` 关闭;特殊环境(如 colima)用 `CC_SSH_SOCK` 显式指定 socket 路径。
-- 在意每次使用都确认的,宿主机换带 Touch ID 确认的 agent(Secretive / 1Password)或 `ssh-add -c`,cca 不干预 agent 侧策略。
+- **① 宿主机 `~/.ssh` 只读挂入**(默认):存在即挂进容器,直接用宿主 key/config 认证,**不依赖 agent** —— agent 没加载 key 也能 push。`CC_SSH_MOUNT=0` 关闭。
+- **② 转发 ssh-agent socket**(默认):私钥本体不进容器,容器只能请求签名、拿不到钥匙,配合带 Touch ID 确认的 agent(Secretive / 1Password)等可做每次确认。`CC_SSH=0` 关闭。
+
+两条都开时 ssh 先试 agent 再试 key 文件,任一成功即通过。`known_hosts` 写入重定向到 `/tmp`(挂载只读,避免写失败噪音),首次连接自动信任。
+
+- macOS(OrbStack / Docker Desktop)与 Linux 均零配置。
+- agent 通道的**前提**是宿主机 agent 里有 key:macOS 一次性 `ssh-add --apple-use-keychain`(重启后 `ssh-add --apple-load-keychain`,可写进 `~/.zshrc` 自动恢复);Linux 无桌面环境需自行起 agent。走 key 通道则不需要这些。
+- 特殊环境(如 colima)用 `CC_SSH_SOCK` 显式指定 agent socket 路径。
 
 ## 随镜像分发的可定制内容
 
@@ -203,7 +208,7 @@ docker push your-registry.example.com/namespace/claude-code:latest
 | 连接超时 / 需走代理 | profile 里设 `HTTP_PROXY` / `HTTPS_PROXY`(容器内不能用 127.0.0.1,用 `host.docker.internal`) |
 | 模型不存在/报错 | 中转模型名与官方不同,在 profile 里改 `ANTHROPIC_DEFAULT_*_MODEL` |
 | 提交报 "empty ident" | 在 `~/.config/cca/common.env` 里配 `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`(及 `GIT_COMMITTER_*`) |
-| 容器内 `git push` SSH 仓库失败 | 宿主机 `ssh-add -l` 是否列出 key(macOS 重启后需 `ssh-add --apple-load-keychain`;Linux 无桌面需自行起 agent);不想用 SSH 就 `CC_SSH=0` + HTTPS remote + token |
+| 容器内 `git push` SSH 仓库失败 | 宿主机 `~/.ssh` 有 key 文件(直接挂入)或 agent 里有 key(转发)二者其一即可;都失败再查:macOS `ssh-add --apple-load-keychain`,Linux 无桌面自行起 agent;不想用 SSH 就 `CC_SSH=0` + HTTPS remote + token |
 | 剪贴板图片粘不进去(Ctrl/Cmd+V 无反应) | 不是 bug,是 Claude Code 在 Linux 上**显式禁用**终端粘贴键读剪贴板图片([issue #48402](https://github.com/anthropics/claude-code/issues/48402),官方标为 not planned)。用 `@路径` 引用图片文件,见「粘贴图片」 |
 
 ## 粘贴图片

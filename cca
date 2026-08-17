@@ -29,6 +29,7 @@ cca —— 容器化 Claude Code 启动器(详见 README:https://github.com/liuy
   cca -p "任务"         非交互跑一个任务;其余 - 开头参数均透传给 claude(claude 帮助:cca --help)
   CC_PROFILE=<名> cca   用某家中转;CC_IMAGE 指定镜像;CC_SEED=0/1 跳过/强制重播播种
   CC_SSH=0 cca          关闭 ssh-agent 转发(默认宿主机有 agent 就转发;私钥本体不进容器)
+  CC_SSH_MOUNT=0 cca    关闭宿主机 ~/.ssh 只读挂载(默认宿主有 ~/.ssh 就挂进容器,直接用其 key)
   CC_SKILLS=0 cca       关闭宿主机 skills 挂载(默认宿主有 ~/.claude/skills 就只读挂入,覆盖镜像公共)
 EOF
   exit 0
@@ -158,7 +159,14 @@ if [ "${1:-}" = "doctor" ]; then
   fi
 
   # === 组3:SSH agent ===
-  group "ssh-agent 转发"
+  group "SSH(agent 转发 + ~/.ssh 挂载)"
+  if [ "${CC_SSH_MOUNT:-1}" = "0" ]; then
+    check ok "CC_SSH_MOUNT=0 已关闭" "容器内无宿主 ~/.ssh,仅剩 agent 转发"
+  elif [ -d "$HOME/.ssh" ]; then
+    check ok "宿主机 ~/.ssh 只读挂入" "$HOME/.ssh → 容器 ~/.ssh(直接用 key,不依赖 agent)"
+  else
+    check "" "宿主机无 ~/.ssh" "仅 agent 转发;要直接走 key 请在宿主机建 ~/.ssh"
+  fi
   if [ "${CC_SSH:-1}" = "0" ]; then
     check ok "已由 CC_SSH=0 关闭" "容器内不转发 ssh-agent"
   elif [ -z "${SSH_AUTH_SOCK:-}" ]; then
@@ -287,18 +295,31 @@ fi
 args+=(-e TERM="${TERM:-xterm-256color}")
 if [ -n "${COLORTERM:-}" ]; then args+=(-e COLORTERM="$COLORTERM"); fi
 
-# --- SSH:转发宿主机 ssh-agent(只挂 agent socket,私钥本体不进容器,容器只能请求签名)---
-# macOS 的 agent socket 穿不过文件共享层,但 Docker Desktop / OrbStack 在 VM 内提供统一转发路径
-# /run/host-services/ssh-auth.sock;Linux/WSL2 直接挂 $SSH_AUTH_SOCK。CC_SSH=0 关闭,
-# 特殊环境(如 colima)用 CC_SSH_SOCK 指定。accept-new 首次自动信任,免去容器内无 known_hosts 的卡壳。
+# --- SSH:宿主机 key 只读挂入 + 转发 agent socket(双通道,任一可用即能 push)---
+# ① 宿主机 ~/.ssh 存在则只读挂进容器:直接用宿主 key/config 认证,不依赖 agent(解决 agent 无 key 场景)。
+#    CC_SSH_MOUNT=0 关闭挂载。只读 ⇒ 容器改不了宿主 key;known_hosts 写入重定向 /tmp 规避只读。
+# ② 转发宿主机 ssh-agent(只挂 agent socket,私钥本体不进容器,容器只能请求签名):
+#    macOS 的 agent socket 穿不过文件共享层,Docker Desktop / OrbStack 在 VM 内提供统一转发路径
+#    /run/host-services/ssh-auth.sock;Linux/WSL2 直接挂 $SSH_AUTH_SOCK。CC_SSH=0 关闭,
+#    特殊环境(如 colima)用 CC_SSH_SOCK 指定。
+SSH_ACTIVE=0
+if [ "${CC_SSH_MOUNT:-1}" != "0" ] && [ -d "$HOME/.ssh" ]; then
+  args+=(-v "$HOME/.ssh:/home/node/.ssh:ro")
+  SSH_ACTIVE=1
+fi
 if [ "${CC_SSH:-1}" != "0" ] && [ -n "${SSH_AUTH_SOCK:-}" ]; then
   if [ "$(uname -s)" = "Darwin" ]; then
     SSH_SOCK="${CC_SSH_SOCK:-/run/host-services/ssh-auth.sock}"
   else
     SSH_SOCK="${CC_SSH_SOCK:-$SSH_AUTH_SOCK}"
   fi
-  args+=(-v "$SSH_SOCK:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent
-         -e GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new")
+  args+=(-v "$SSH_SOCK:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent)
+  SSH_ACTIVE=1
+fi
+# 任一 SSH 通道开启即注入 GIT_SSH_COMMAND:accept-new 首次自动信任免卡壳;
+# UserKnownHostsFile 指 /tmp —— ~/.ssh 只读挂载下写 known_hosts 会失败,重定向后无噪音。
+if [ "$SSH_ACTIVE" = "1" ]; then
+  args+=(-e GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts")
 fi
 
 # --- 环境注入:common.env(跨 profile 公共,如 git 身份)先加载,profile 同键覆盖 ---
