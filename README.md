@@ -49,8 +49,8 @@ mkdir -p ~/.local/bin && curl -fsSL \
 ```bash
 cd /你的/项目            # cca 把当前所在目录挂进容器,Claude 直接操作宿主机真实文件
 cca                     # 默认官方订阅,首次走 OAuth 登录
-cca init glm            # 一键生成中转 profile(见「第三方中转」)
-CC_PROFILE=glm cca      # 用某家中转
+cca init deepseek       # 一键生成中转 profile(见「第三方中转」)
+CC_PROFILE=deepseek cca # 用某家中转
 cca -p "把 README 翻译成英文"   # 非交互跑一个任务
 cca bash                # 进容器 shell 调试(带 Tab 补全和 ll/gs/gd 等常用别名)
 cca doctor              # 自检:docker / CC_IMAGE / profile / ssh / 卷与版本;默认只报问题,-v 看全部
@@ -103,11 +103,11 @@ echo "alias ccm='CC_PROFILE=minimax cca'" >> ~/.zshrc   # 之后敲 ccm = 用 Mi
 每家中转商写一个 profile 文件放在 `~/.config/cca/<名>.env`,想用哪家就 `CC_PROFILE=<名> cca`。
 官方订阅是内置的空 profile(`official`),无需建文件 —— 不带 `CC_PROFILE` 就是它。
 
-**建一个 profile**:`cca init <名>` 从仓库 `profiles/` 模板一键生成(现有 **official**、**minimax**、**glm** 三份):
+**建一个 profile**:`cca init <名>` 从仓库 `profiles/` 模板一键生成(现有 **official**、**minimax**、**glm**、**deepseek** 四份):
 
 ```bash
-cca init glm                 # 生成 ~/.config/cca/glm.env(自动 chmod 600),再编辑填 KEY
-CC_KEY=你的KEY cca init glm   # 或一步到位:生成的同时把 KEY 注入
+cca init deepseek                 # 生成 ~/.config/cca/deepseek.env(自动 chmod 600),再编辑填 KEY
+CC_KEY=你的KEY cca init deepseek   # 或一步到位:生成的同时把 KEY 注入
 ```
 
 模板之外的中转商,手建 `~/.config/cca/<名>.env` 即可(键见下表)。
@@ -115,6 +115,7 @@ CC_KEY=你的KEY cca init glm   # 或一步到位:生成的同时把 KEY 注入
 **用**:
 ```bash
 CC_PROFILE=minimax cca    # CC_PROFILE 写错或不存在时,cca 会列出所有可用 profile
+CC_PROFILE=deepseek cca   # DeepSeek(官方 Anthropic 兼容端点,V4 模型)
 ```
 
 **profile 里的键**:
