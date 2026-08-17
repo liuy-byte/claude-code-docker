@@ -61,9 +61,9 @@ cca -h                  # cca 自身用法(cca --help 则透传显示 claude 的
 - **切项目** = `cd` 过去再敲 `cca`;改动实时落在宿主机磁盘上。
 - **切中转** = 加 `CC_PROFILE=<名>`。
 
-**顺手加别名**(常用某家时,省得每次写 `CC_PROFILE=`):
+**顺手加别名**(`cca init` 只生成 profile 文件、**不会自动设别名**;常用某家就自己加一条,省得每次写 `CC_PROFILE=`):
 ```bash
-echo "alias ccm='CC_PROFILE=minimax cca'" >> ~/.zshrc   # 之后敲 ccm = 用 MiniMax
+echo "alias ccd='CC_PROFILE=deepseek cca'" >> ~/.zshrc   # 之后敲 ccd = 用 DeepSeek
 ```
 
 **首次官方订阅登录**:终端打印一个 URL → 在**宿主机浏览器**打开、用 Claude 账号授权 → 把回调 code 贴回终端。登录态存进官方订阅的专属卷(`claude-config`),之后不用再登。
