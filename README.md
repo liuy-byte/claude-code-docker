@@ -109,7 +109,7 @@ CC_PROFILE=deepseek cca   # DeepSeek(官方 Anthropic 兼容端点,V4 模型)
 
 ### git 身份
 
-在 `~/.config/cca/common.env` 里配 `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`(及对应 `GIT_COMMITTER_*`),对所有 profile(含官方订阅)生效;profile 里同键可覆盖。不复用宿主机 `~/.gitconfig`。
+首次用 **`cca init common`** 生成 `~/.config/cca/common.env` 模板,再编辑填充 `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`(及对应 `GIT_COMMITTER_*`,模板里都注释着)。对所有 profile(含官方订阅)生效;profile 里同键可覆盖。不复用宿主机 `~/.gitconfig`。模板里还有 cc-vision 用的 `MINIMAX_API_KEY`(见「粘贴图片」)和可选代理,填哪条启用哪条。
 
 ### SSH(key 挂载 + agent 转发)
 
@@ -132,7 +132,7 @@ CC_PROFILE=deepseek cca   # DeepSeek(官方 Anthropic 兼容端点,V4 模型)
 
 仓库 `assets/skills/` 下的 skill(目录名一律 `cc-` 前缀)会打进镜像,容器**每次启动**自动同步到卷内 `~/.claude/skills/`(个人级,所有项目可用):
 
-- **自带**:`cc-commit` —— 说"提交一下"时按团队约定式提交(Conventional Commits)规范生成 commit message 并提交。想加更多公共 skill,照 `cc-` 前缀在 `assets/skills/` 下建目录即可。
+- **自带**:`cc-commit` —— 说"提交一下"时按团队约定式提交(Conventional Commits)规范生成 commit message 并提交;`cc-vision` —— 当前模型收不了图(如 DeepSeek)时,Claude 会调 MiniMax-M3 视觉接口代替看图,前提是在 `common.env` 配好 `MINIMAX_API_KEY`(见「粘贴图片」)。想加更多公共 skill,照 `cc-` 前缀在 `assets/skills/` 下建目录即可。
 - **清理**:镜像里删掉的公共 skill,卷里同步删除,不残留。
 - **隔离**:非 `cc-*` 的自建 skill 永不触碰,放心往卷里加自己的。
 
@@ -210,6 +210,7 @@ docker push your-registry.example.com/namespace/claude-code:latest
 | 提交报 "empty ident" | 在 `~/.config/cca/common.env` 里配 `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`(及 `GIT_COMMITTER_*`) |
 | 容器内 `git push` SSH 仓库失败 | 宿主机 `~/.ssh` 有 key 文件(直接挂入)或 agent 里有 key(转发)二者其一即可;都失败再查:macOS `ssh-add --apple-load-keychain`,Linux 无桌面自行起 agent;不想用 SSH 就 `CC_SSH=0` + HTTPS remote + token |
 | 剪贴板图片粘不进去(Ctrl/Cmd+V 无反应) | 不是 bug,是 Claude Code 在 Linux 上**显式禁用**终端粘贴键读剪贴板图片([issue #48402](https://github.com/anthropics/claude-code/issues/48402),官方标为 not planned)。用 `@路径` 引用图片文件,见「粘贴图片」 |
+| `@图片` 报 400 / image 不支持 | 当前模型是纯文本端点(如 DeepSeek)不收图,不是配置问题。换支持图片的模型/profile,或让 Claude 走 `cc-vision` 调 MiniMax M3 看图(需 `common.env` 配 `MINIMAX_API_KEY`),见「粘贴图片」 |
 
 ## 粘贴图片
 
@@ -220,6 +221,10 @@ docker push your-registry.example.com/namespace/claude-code:latest
 3. 或直接**从访达把图片文件拖进输入框**,自动变成路径。
 
 > `cca` 把当前目录以宿主机**同名路径**挂进容器,所以你 `@` 的路径在容器内外完全一致,不会错位 —— 宿主机能看到的图,容器就能读到。
+
+**中转模型收不了图(DeepSeek / 纯文本端点)**:`@路径` 引用后,图片会原样发给当前端点,DeepSeek 等纯文本模型会直接 400 拒绝。两条路:
+- 图片任务切支持图片的模型(官方订阅,或 `CC_PROFILE=minimax cca`)另开会话;
+- 留在当前会话,让 Claude 走 **`cc-vision` skill** —— 它把图片 base64 转给 MiniMax-M3 视觉接口分析,再回来继续处理。前提是配好 `MINIMAX_API_KEY`:`cca init common` 生成 `~/.config/cca/common.env` 模板,把里面的 `MINIMAX_API_KEY` 行解开填上(对所有 profile 生效,配完重启 cca)。
 
 ## 卸载
 

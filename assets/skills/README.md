@@ -5,9 +5,10 @@ entrypoint(`assets/cc-entrypoint`)同步到卷内 `~/.claude/skills/`(个人级,
 
 约定:
 
-- **目录名必须以 `cc-` 为前缀**(如本仓库自带的 `cc-commit/SKILL.md`)。
+- **目录名必须以 `cc-` 为前缀**(如本仓库自带的 `cc-commit/`、`cc-vision/`)。
   同步逻辑靠该前缀识别公共 skill:启动时先删卷内 `cc-*` 再铺当前版,
   镜像里删掉的 skill 不会在卷里残留;非 `cc-*` 的用户私有 skill 永不触碰。
-- **不要放密钥**。带密钥的配置走 profile env-file(`~/.config/cca/<名>.env`)。
+- **不要放密钥**。带密钥的配置走 profile env-file(`~/.config/cca/<名>.env`),或对所有
+  profile 生效的 `common.env`(如 `cc-vision` 用的 `MINIMAX_API_KEY`)。
 
 更新路径:改这里 → CI 构建 → `docker pull` → 下次 cca 启动自动生效,老机器老卷无需任何手动操作。
